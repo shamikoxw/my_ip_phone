@@ -19,18 +19,26 @@ public class AudioThread extends Thread {
     private TargetDataLine microphone;  // 麦克风（输入）
     private SourceDataLine speaker;     // 扬声器（输出）
 
+    // UI引用（用于更新麦克风指示器）
+    private IPPhone phoneUI;
+
+    // 音量检测阈值
+    private static final int VOLUME_THRESHOLD = 500; // 声音强度阈值
+
     /**
      * 构造函数
      * @param ip 对方IP地址
      * @param port 对方UDP端口
      * @param socket UDP套接字
      * @param isSender true为发送线程，false为接收线程
+     * @param phoneUI 主界面引用
      */
-    public AudioThread(String ip, int port, DatagramSocket socket, boolean isSender) {
+    public AudioThread(String ip, int port, DatagramSocket socket, boolean isSender, IPPhone phoneUI) {
         this.remoteIP = ip;
         this.remotePort = port;
         this.socket = socket;
         this.isSender = isSender;
+        this.phoneUI = phoneUI;
     }
 
     /**
@@ -83,6 +91,10 @@ public class AudioThread extends Thread {
         while (running) {
             int count = microphone.read(buffer, 0, buffer.length);
             if (count > 0) {
+                // 检测音量
+                boolean hasSound = detectVolume(buffer, count);
+                phoneUI.updateMicIndicator(hasSound);
+
                 try {
                     // 封装成UDP数据包并发送
                     DatagramPacket packet = new DatagramPacket(
@@ -98,6 +110,28 @@ public class AudioThread extends Thread {
                 }
             }
         }
+    }
+
+    /**
+     * 检测音频数据的音量
+     * @param buffer 音频数据缓冲区
+     * @param length 数据长度
+     * @return true表示有声音，false表示静音
+     */
+    private boolean detectVolume(byte[] buffer, int length) {
+        // 计算音频数据的RMS（均方根）值
+        long sum = 0;
+        for (int i = 0; i < length - 1; i += 2) {
+            // 将两个字节组合成一个16位样本（大端序）
+            int sample = (buffer[i] << 8) | (buffer[i + 1] & 0xFF);
+            sum += sample * sample;
+        }
+
+        // 计算RMS值
+        double rms = Math.sqrt(sum / (length / 2.0));
+
+        // 与阈值比较
+        return rms > VOLUME_THRESHOLD;
     }
 
     /**
@@ -165,6 +199,11 @@ public class AudioThread extends Thread {
             } catch (Exception ex) {
                 System.err.println("关闭扬声器失败: " + ex.getMessage());
             }
+        }
+
+        // 恢复麦克风指示器为灰色
+        if (isSender && phoneUI != null) {
+            phoneUI.updateMicIndicator(false);
         }
     }
 }

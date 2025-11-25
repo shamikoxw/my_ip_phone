@@ -2,6 +2,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.*;
 import java.net.*;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 /**
  * IP电话主程序
@@ -13,6 +15,9 @@ public class IPPhone extends JFrame {
     private JButton dialButton, hangupButton, listenButton;
     private JTextArea statusArea;
     private JLabel loadingLabel; // 加载图标
+    private JLabel callStatusLabel; // 通话状态标签
+    private JLabel callDurationLabel; // 通话时长标签
+    private JPanel micIndicator; // 麦克风指示器
 
     // 网络组件
     private Socket tcpSocket;
@@ -31,9 +36,17 @@ public class IPPhone extends JFrame {
     private Thread messageListener;
     private volatile boolean shouldListen = false;
 
+    // 通话时长计时
+    private Timer callTimer;
+    private long callStartTime;
+
+    // 监听服务器
+    private ServerSocket serverSocket;
+    private Thread listenThread;
+
     public IPPhone() {
         setTitle("IP Phone - 网络电话");
-        setSize(450, 350);
+        setSize(450, 400);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout(10, 10));
 
@@ -50,7 +63,7 @@ public class IPPhone extends JFrame {
         topPanel.add(portField);
 
         dialButton = new JButton("Dial 拨号");
-        listenButton = new JButton("Listen 监听");
+        listenButton = new JButton("Stop Listen 停止监听");
         topPanel.add(dialButton);
         topPanel.add(listenButton);
 
@@ -63,24 +76,54 @@ public class IPPhone extends JFrame {
         statusArea.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
         centerPanel.add(new JScrollPane(statusArea), BorderLayout.CENTER);
 
+        // 通话状态面板
+        JPanel statusPanel = new JPanel(new BorderLayout());
+        callStatusLabel = new JLabel("", JLabel.CENTER);
+        callStatusLabel.setFont(new Font("微软雅黑", Font.BOLD, 14));
+        callStatusLabel.setForeground(new Color(0, 150, 0));
+        statusPanel.add(callStatusLabel, BorderLayout.NORTH);
+
+        callDurationLabel = new JLabel("", JLabel.CENTER);
+        callDurationLabel.setFont(new Font("Arial", Font.PLAIN, 12));
+        callDurationLabel.setForeground(Color.DARK_GRAY);
+        statusPanel.add(callDurationLabel, BorderLayout.CENTER);
+
         // 加载提示标签
         loadingLabel = new JLabel("", JLabel.CENTER);
         loadingLabel.setForeground(Color.BLUE);
         loadingLabel.setVisible(false);
-        centerPanel.add(loadingLabel, BorderLayout.SOUTH);
+        statusPanel.add(loadingLabel, BorderLayout.SOUTH);
 
+        centerPanel.add(statusPanel, BorderLayout.SOUTH);
         add(centerPanel, BorderLayout.CENTER);
 
-        // 底部面板 - 挂断按钮
+        // 底部面板 - 挂断按钮和麦克风指示器
+        JPanel bottomPanel = new JPanel(new BorderLayout());
+
+        // 麦克风指示器（左下角）
+        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        micIndicator = new JPanel();
+        micIndicator.setPreferredSize(new Dimension(30, 30));
+        micIndicator.setBackground(Color.GRAY);
+        micIndicator.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 2));
+        JLabel micLabel = new JLabel("🎤");
+        micLabel.setFont(new Font("Arial", Font.PLAIN, 16));
+        micIndicator.add(micLabel);
+        leftPanel.add(micIndicator);
+        bottomPanel.add(leftPanel, BorderLayout.WEST);
+
+        // 挂断按钮（居中）
         hangupButton = new JButton("Hangup 挂断");
         hangupButton.setEnabled(false);
-        JPanel bottomPanel = new JPanel();
-        bottomPanel.add(hangupButton);
+        JPanel centerButtonPanel = new JPanel();
+        centerButtonPanel.add(hangupButton);
+        bottomPanel.add(centerButtonPanel, BorderLayout.CENTER);
+
         add(bottomPanel, BorderLayout.SOUTH);
 
         // 按钮事件监听器
         dialButton.addActionListener(e -> dial());
-        listenButton.addActionListener(e -> listen());
+        listenButton.addActionListener(e -> toggleListen());
         hangupButton.addActionListener(e -> hangup());
 
         // 窗口关闭时清理资源
@@ -88,20 +131,127 @@ public class IPPhone extends JFrame {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
                 cleanup();
+                stopListening();
             }
         });
 
         setVisible(true);
+
+        // 启动时自动开始监听
+        startListening();
+    }
+
+    /**
+     * 切换监听状态
+     */
+    private void toggleListen() {
+        if (isListening) {
+            stopListening();
+        } else {
+            startListening();
+        }
+    }
+
+    /**
+     * 开始监听
+     */
+    private void startListening() {
+        if (isConnected) {
+            statusArea.append("错误：正在通话中，无法开始监听\n");
+            return;
+        }
+
+        listenThread = new Thread(() -> {
+            try {
+                int port = Integer.parseInt(portField.getText());
+                serverSocket = new ServerSocket(port);
+                isListening = true;
+
+                SwingUtilities.invokeLater(() -> {
+                    statusArea.append("✓ 已开始监听端口 " + port + "，等待来电...\n");
+                    listenButton.setText("Stop Listen 停止监听");
+                    dialButton.setEnabled(false);
+                });
+
+                while (isListening) {
+                    try {
+                        // 等待连接（阻塞，但可被中断）
+                        tcpSocket = serverSocket.accept();
+
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("收到来电，来自: " + tcpSocket.getInetAddress() + "\n");
+                        });
+
+                        tcpOut = new PrintWriter(tcpSocket.getOutputStream(), true);
+                        tcpIn = new BufferedReader(new InputStreamReader(tcpSocket.getInputStream()));
+
+                        // 读取拨号请求
+                        String msg = tcpIn.readLine();
+                        if ("DIAL".equals(msg)) {
+                            tcpOut.println("ACCEPT"); // 自动接受
+                            isConnected = true;
+
+                            SwingUtilities.invokeLater(() -> {
+                                statusArea.append("✓ 已接听，正在建立音频通道...\n");
+                                loadingLabel.setVisible(false);
+                                hangupButton.setEnabled(true);
+                                dialButton.setEnabled(false);
+                                listenButton.setEnabled(false);
+                            });
+
+                            // 启动音频传输
+                            startAudio(tcpSocket.getInetAddress().getHostAddress(), port + 1);
+
+                            // 启动消息监听线程
+                            startMessageListener();
+
+                            // 开始计时
+                            startCallTimer();
+
+                            break; // 停止接受新连接
+                        }
+                    } catch (SocketException se) {
+                        // ServerSocket被关闭，正常退出
+                        break;
+                    }
+                }
+            } catch (Exception ex) {
+                if (isListening) {
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("✗ 监听错误: " + ex.getMessage() + "\n");
+                    });
+                }
+            }
+        });
+        listenThread.start();
+    }
+
+    /**
+     * 停止监听
+     */
+    private void stopListening() {
+        isListening = false;
+        try {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
+            }
+            SwingUtilities.invokeLater(() -> {
+                statusArea.append("已停止监听\n");
+                listenButton.setText("Start Listen 开始监听");
+                dialButton.setEnabled(true);
+            });
+        } catch (IOException ex) {
+            ex.printStackTrace();
+        }
     }
 
     /**
      * 拨号功能 - 主动发起连接
      */
     private void dial() {
-        // 如果正在监听，不允许拨号
+        // 如果正在监听，先停止监听
         if (isListening) {
-            statusArea.append("错误：正在监听状态，无法拨号。请先停止监听。\n");
-            return;
+            stopListening();
         }
 
         // 在新线程中执行拨号，避免UI卡顿
@@ -149,6 +299,9 @@ public class IPPhone extends JFrame {
 
                     // 启动消息监听线程，监听对方的挂断消息
                     startMessageListener();
+
+                    // 开始计时
+                    startCallTimer();
                 } else {
                     statusArea.append("❌ 连接被拒绝\n");
                     cleanup();
@@ -164,77 +317,33 @@ public class IPPhone extends JFrame {
     }
 
     /**
-     * 监听功能 - 等待对方连接
+     * 启动通话计时器
      */
-    private void listen() {
-        // 如果已经在通话或已经在监听，不允许重复监听
-        if (isConnected || isListening) {
-            statusArea.append("错误：已在通话或监听中\n");
-            return;
+    private void startCallTimer() {
+        callStartTime = System.currentTimeMillis();
+        callStatusLabel.setText("● 通话中");
+        callDurationLabel.setText("00:00");
+
+        callTimer = new Timer(1000, e -> {
+            long elapsed = System.currentTimeMillis() - callStartTime;
+            long seconds = elapsed / 1000;
+            long minutes = seconds / 60;
+            seconds = seconds % 60;
+            callDurationLabel.setText(String.format("%02d:%02d", minutes, seconds));
+        });
+        callTimer.start();
+    }
+
+    /**
+     * 停止通话计时器
+     */
+    private void stopCallTimer() {
+        if (callTimer != null) {
+            callTimer.stop();
+            callTimer = null;
         }
-
-        new Thread(() -> {
-            ServerSocket serverSocket = null;
-            try {
-                int port = Integer.parseInt(portField.getText());
-                serverSocket = new ServerSocket(port);
-                isListening = true;
-
-                statusArea.append("正在监听端口 " + port + "，等待来电...\n");
-
-                SwingUtilities.invokeLater(() -> {
-                    listenButton.setEnabled(false);
-                    dialButton.setEnabled(false);
-                    loadingLabel.setText("等待来电中...");
-                    loadingLabel.setVisible(true);
-                });
-
-                // 等待连接（阻塞）
-                tcpSocket = serverSocket.accept();
-                statusArea.append("收到来电，来自: " + tcpSocket.getInetAddress() + "\n");
-
-                tcpOut = new PrintWriter(tcpSocket.getOutputStream(), true);
-                tcpIn = new BufferedReader(new InputStreamReader(tcpSocket.getInputStream()));
-
-                // 读取拨号请求
-                String msg = tcpIn.readLine();
-                if ("DIAL".equals(msg)) {
-                    tcpOut.println("ACCEPT"); // 自动接受
-                    isConnected = true;
-                    isListening = false;
-
-                    statusArea.append("✅ 已接听，正在建立音频通道...\n");
-
-                    SwingUtilities.invokeLater(() -> {
-                        loadingLabel.setVisible(false);
-                        hangupButton.setEnabled(true);
-                    });
-
-                    // 启动音频传输
-                    startAudio(tcpSocket.getInetAddress().getHostAddress(), port + 1);
-
-                    // 启动消息监听线程
-                    startMessageListener();
-                }
-            } catch (Exception ex) {
-                statusArea.append("❌ 监听错误: " + ex.getMessage() + "\n");
-                SwingUtilities.invokeLater(() -> {
-                    loadingLabel.setVisible(false);
-                    listenButton.setEnabled(true);
-                    dialButton.setEnabled(true);
-                });
-                isListening = false;
-            } finally {
-                // 关闭ServerSocket
-                if (serverSocket != null) {
-                    try {
-                        serverSocket.close();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-        }).start();
+        callStatusLabel.setText("");
+        callDurationLabel.setText("");
     }
 
     /**
@@ -245,14 +354,28 @@ public class IPPhone extends JFrame {
     private void startAudio(String ip, int port) {
         try {
             udpSocket = new DatagramSocket(port);
-            audioSender = new AudioThread(ip, port, udpSocket, true);
-            audioReceiver = new AudioThread(ip, port, udpSocket, false);
+            audioSender = new AudioThread(ip, port, udpSocket, true, this);
+            audioReceiver = new AudioThread(ip, port, udpSocket, false, this);
             audioSender.start();
             audioReceiver.start();
             statusArea.append("✅ 音频通道已建立，可以通话\n");
         } catch (Exception ex) {
             statusArea.append("❌ 音频启动失败: " + ex.getMessage() + "\n");
         }
+    }
+
+    /**
+     * 更新麦克风指示器
+     * @param hasSound 是否有声音
+     */
+    public void updateMicIndicator(boolean hasSound) {
+        SwingUtilities.invokeLater(() -> {
+            if (hasSound) {
+                micIndicator.setBackground(new Color(0, 200, 0)); // 绿色
+            } else {
+                micIndicator.setBackground(Color.GRAY); // 灰色
+            }
+        });
     }
 
     /**
@@ -269,6 +392,7 @@ public class IPPhone extends JFrame {
                         statusArea.append("对方已挂断\n");
                         SwingUtilities.invokeLater(() -> {
                             cleanup();
+                            startListening(); // 重新开始监听
                         });
                         break;
                     }
@@ -278,6 +402,7 @@ public class IPPhone extends JFrame {
                     statusArea.append("连接已断开\n");
                     SwingUtilities.invokeLater(() -> {
                         cleanup();
+                        startListening(); // 重新开始监听
                     });
                 }
             }
@@ -299,6 +424,7 @@ public class IPPhone extends JFrame {
             statusArea.append("挂断错误: " + ex.getMessage() + "\n");
         } finally {
             cleanup();
+            startListening(); // 挂断后重新开始监听
         }
     }
 
@@ -307,6 +433,9 @@ public class IPPhone extends JFrame {
      */
     private void cleanup() {
         try {
+            // 停止计时器
+            stopCallTimer();
+
             // 停止消息监听
             shouldListen = false;
 
@@ -320,7 +449,9 @@ public class IPPhone extends JFrame {
 
             // 重置状态
             isConnected = false;
-            isListening = false;
+
+            // 恢复麦克风指示器
+            micIndicator.setBackground(Color.GRAY);
 
             // 恢复UI
             SwingUtilities.invokeLater(() -> {
