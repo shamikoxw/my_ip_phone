@@ -11,7 +11,7 @@ import java.util.Date;
  */
 public class IPPhone extends JFrame {
     // UI组件
-    private JTextField ipField, portField;
+    private JTextField ipField, portField, udpPortField;
     private JButton dialButton, hangupButton, listenButton;
     private JTextArea statusArea;
     private JLabel loadingLabel; // 加载图标
@@ -46,21 +46,25 @@ public class IPPhone extends JFrame {
 
     public IPPhone() {
         setTitle("IP Phone - 网络电话");
-        setSize(450, 400);
+        setSize(450, 430);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout(10, 10));
 
         // 顶部面板 - 输入区域
-        JPanel topPanel = new JPanel(new GridLayout(3, 2, 10, 10));
+        JPanel topPanel = new JPanel(new GridLayout(4, 2, 10, 10));
         topPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10)); // 添加边距
 
         topPanel.add(new JLabel("IP Address:"));
         ipField = new JTextField("127.0.0.1");
         topPanel.add(ipField);
 
-        topPanel.add(new JLabel("Port:"));
+        topPanel.add(new JLabel("TCP Port:"));
         portField = new JTextField("5000");
         topPanel.add(portField);
+
+        topPanel.add(new JLabel("UDP Port:"));
+        udpPortField = new JTextField("5001");
+        topPanel.add(udpPortField);
 
         dialButton = new JButton("Dial 拨号");
         listenButton = new JButton("Start Listen 开始监听");
@@ -167,15 +171,38 @@ public class IPPhone extends JFrame {
         }
 
         listenThread = new Thread(() -> {
+            ServerSocket tempServerSocket = null;
             try {
                 int port = Integer.parseInt(portField.getText());
-                serverSocket = new ServerSocket(port);
+                int udpPort = Integer.parseInt(udpPortField.getText());
+
+                // 先测试UDP端口是否可用
+                try {
+                    DatagramSocket testUdpSocket = new DatagramSocket(udpPort);
+                    testUdpSocket.close();
+                } catch (SocketException se) {
+                    final String errorMsg = "UDP端口 " + udpPort + " 已被占用\n请更换UDP端口后重试";
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("✗ UDP端口 " + udpPort + " 已被占用，请更换端口\n");
+                        JOptionPane.showMessageDialog(IPPhone.this,
+                                errorMsg,
+                                "端口占用",
+                                JOptionPane.ERROR_MESSAGE);
+                    });
+                    return;
+                }
+
+                tempServerSocket = new ServerSocket(port);
+                serverSocket = tempServerSocket;
                 isListening = true;
 
                 SwingUtilities.invokeLater(() -> {
-                    statusArea.append("✓ 已开始监听端口 " + port + "，等待来电...\n");
+                    statusArea.append("✓ 已开始监听 TCP端口:" + port + " UDP端口:" + udpPort + "\n");
                     listenButton.setText("Stop Listen 停止监听");
                     dialButton.setEnabled(false);
+                    ipField.setEnabled(false);
+                    portField.setEnabled(false);
+                    udpPortField.setEnabled(false);
                 });
 
                 while (isListening) {
@@ -206,7 +233,14 @@ public class IPPhone extends JFrame {
                             });
 
                             // 启动音频传输
-                            startAudio(tcpSocket.getInetAddress().getHostAddress(), port + 1);
+                            if (!startAudio(tcpSocket.getInetAddress().getHostAddress(), udpPort)) {
+                                // 音频启动失败，挂断通话
+                                SwingUtilities.invokeLater(() -> {
+                                    statusArea.append("✗ 音频通道建立失败，通话终止\n");
+                                    hangup();
+                                });
+                                break;
+                            }
 
                             // 启动消息监听线程
                             startMessageListener();
@@ -221,20 +255,50 @@ public class IPPhone extends JFrame {
                         break;
                     }
                 }
+            } catch (NumberFormatException nfe) {
+                SwingUtilities.invokeLater(() -> {
+                    statusArea.append("✗ 端口号格式错误，请输入有效的数字\n");
+                    JOptionPane.showMessageDialog(this,
+                            "端口号格式错误\n请输入有效的数字",
+                            "输入错误",
+                            JOptionPane.ERROR_MESSAGE);
+                });
+            } catch (BindException be) {
+                SwingUtilities.invokeLater(() -> {
+                    int port = Integer.parseInt(portField.getText());
+                    statusArea.append("✗ TCP端口 " + port + " 已被占用，请更换端口\n");
+                    JOptionPane.showMessageDialog(this,
+                            "TCP端口 " + port + " 已被占用\n请更换TCP端口后重试",
+                            "端口占用",
+                            JOptionPane.ERROR_MESSAGE);
+                    listenButton.setText("Start Listen 开始监听");
+                    dialButton.setEnabled(true);
+                    ipField.setEnabled(true);
+                    portField.setEnabled(true);
+                    udpPortField.setEnabled(true);
+                });
+                isListening = false;
             } catch (Exception ex) {
                 if (isListening) {
                     SwingUtilities.invokeLater(() -> {
                         statusArea.append("✗ 监听错误: " + ex.getMessage() + "\n");
+                        JOptionPane.showMessageDialog(this,
+                                "监听错误: " + ex.getMessage(),
+                                "错误",
+                                JOptionPane.ERROR_MESSAGE);
                         listenButton.setText("Start Listen 开始监听");
                         dialButton.setEnabled(true);
+                        ipField.setEnabled(true);
+                        portField.setEnabled(true);
+                        udpPortField.setEnabled(true);
                     });
                     isListening = false;
                 }
             } finally {
                 // 确保ServerSocket被关闭
-                if (serverSocket != null && !serverSocket.isClosed()) {
+                if (tempServerSocket != null && !tempServerSocket.isClosed()) {
                     try {
-                        serverSocket.close();
+                        tempServerSocket.close();
                     } catch (IOException e) {
                         e.printStackTrace();
                     }
@@ -261,6 +325,9 @@ public class IPPhone extends JFrame {
                 statusArea.append("已停止监听\n");
                 listenButton.setText("Start Listen 开始监听");
                 dialButton.setEnabled(true);
+                ipField.setEnabled(true);
+                portField.setEnabled(true);
+                udpPortField.setEnabled(true);
             });
         } catch (IOException ex) {
             ex.printStackTrace();
@@ -274,6 +341,12 @@ public class IPPhone extends JFrame {
         // 如果正在监听，先停止监听
         if (isListening) {
             stopListening();
+            // 等待监听完全停止
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
         }
 
         // 在新线程中执行拨号，避免UI卡顿
@@ -281,12 +354,37 @@ public class IPPhone extends JFrame {
             try {
                 String ip = ipField.getText();
                 int port = Integer.parseInt(portField.getText());
+                int udpPort = Integer.parseInt(udpPortField.getText());
+
+                // 先测试UDP端口是否可用
+                try {
+                    DatagramSocket testUdpSocket = new DatagramSocket(udpPort);
+                    testUdpSocket.close();
+                } catch (SocketException se) {
+                    final String errorMsg = "UDP端口 " + udpPort + " 已被占用\n请更换UDP端口后重试";
+                    SwingUtilities.invokeLater(() -> {
+                        loadingLabel.setVisible(false);
+                        dialButton.setEnabled(true);
+                        ipField.setEnabled(true);
+                        portField.setEnabled(true);
+                        udpPortField.setEnabled(true);
+                        statusArea.append("✗ UDP端口 " + udpPort + " 已被占用，请更换端口\n");
+                        JOptionPane.showMessageDialog(IPPhone.this,
+                                errorMsg,
+                                "端口占用",
+                                JOptionPane.ERROR_MESSAGE);
+                    });
+                    return;
+                }
 
                 // 显示加载状态
                 SwingUtilities.invokeLater(() -> {
                     loadingLabel.setText("正在连接 " + ip + ":" + port + " ...");
                     loadingLabel.setVisible(true);
                     dialButton.setEnabled(false);
+                    ipField.setEnabled(false);
+                    portField.setEnabled(false);
+                    udpPortField.setEnabled(false);
                 });
 
                 statusArea.append("正在拨号至 " + ip + ":" + port + "...\n");
@@ -317,7 +415,14 @@ public class IPPhone extends JFrame {
                     });
 
                     // 启动音频传输
-                    startAudio(ip, port + 1);
+                    if (!startAudio(ip, udpPort)) {
+                        // 音频启动失败，挂断通话
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("✗ 音频通道建立失败，通话终止\n");
+                            hangup();
+                        });
+                        return;
+                    }
 
                     // 启动消息监听线程，监听对方的挂断消息
                     startMessageListener();
@@ -328,10 +433,26 @@ public class IPPhone extends JFrame {
                     statusArea.append("❌ 连接被拒绝\n");
                     cleanup();
                 }
+            } catch (NumberFormatException nfe) {
+                SwingUtilities.invokeLater(() -> {
+                    loadingLabel.setVisible(false);
+                    dialButton.setEnabled(true);
+                    ipField.setEnabled(true);
+                    portField.setEnabled(true);
+                    udpPortField.setEnabled(true);
+                    statusArea.append("✗ 端口号格式错误，请输入有效的数字\n");
+                    JOptionPane.showMessageDialog(this,
+                            "端口号格式错误\n请输入有效的数字",
+                            "输入错误",
+                            JOptionPane.ERROR_MESSAGE);
+                });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
                     loadingLabel.setVisible(false);
                     dialButton.setEnabled(true);
+                    ipField.setEnabled(true);
+                    portField.setEnabled(true);
+                    udpPortField.setEnabled(true);
                 });
                 statusArea.append("❌ 拨号失败: " + ex.getMessage() + "\n");
             }
@@ -372,8 +493,9 @@ public class IPPhone extends JFrame {
      * 启动音频传输
      * @param ip 对方IP地址
      * @param port UDP端口
+     * @return 是否成功启动
      */
-    private void startAudio(String ip, int port) {
+    private boolean startAudio(String ip, int port) {
         try {
             udpSocket = new DatagramSocket(port);
             audioSender = new AudioThread(ip, port, udpSocket, true, this);
@@ -381,8 +503,27 @@ public class IPPhone extends JFrame {
             audioSender.start();
             audioReceiver.start();
             statusArea.append("✅ 音频通道已建立，可以通话\n");
+            return true;
+        } catch (SocketException se) {
+            // UDP端口被占用的特殊处理
+            final String errorMsg = "UDP端口 " + port + " 已被占用\n请更换UDP端口后重试";
+            statusArea.append("✗ 音频启动失败: UDP端口 " + port + " 已被占用\n");
+            SwingUtilities.invokeLater(() -> {
+                JOptionPane.showMessageDialog(IPPhone.this,
+                        errorMsg,
+                        "端口占用",
+                        JOptionPane.ERROR_MESSAGE);
+            });
+            if (udpSocket != null && !udpSocket.isClosed()) {
+                udpSocket.close();
+            }
+            return false;
         } catch (Exception ex) {
             statusArea.append("❌ 音频启动失败: " + ex.getMessage() + "\n");
+            if (udpSocket != null && !udpSocket.isClosed()) {
+                udpSocket.close();
+            }
+            return false;
         }
     }
 
@@ -479,8 +620,12 @@ public class IPPhone extends JFrame {
             SwingUtilities.invokeLater(() -> {
                 dialButton.setEnabled(true);
                 listenButton.setEnabled(true);
+                listenButton.setText("Start Listen 开始监听"); // 确保按钮文字正确
                 hangupButton.setEnabled(false);
                 loadingLabel.setVisible(false);
+                ipField.setEnabled(true);
+                portField.setEnabled(true);
+                udpPortField.setEnabled(true);
             });
         } catch (Exception ex) {
             ex.printStackTrace();
