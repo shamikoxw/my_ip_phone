@@ -63,7 +63,7 @@ public class IPPhone extends JFrame {
         topPanel.add(portField);
 
         dialButton = new JButton("Dial 拨号");
-        listenButton = new JButton("Stop Listen 停止监听");
+        listenButton = new JButton("Start Listen 开始监听");
         topPanel.add(dialButton);
         topPanel.add(listenButton);
 
@@ -106,8 +106,9 @@ public class IPPhone extends JFrame {
         micIndicator.setPreferredSize(new Dimension(30, 30));
         micIndicator.setBackground(Color.GRAY);
         micIndicator.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 2));
-        JLabel micLabel = new JLabel("🎤");
-        micLabel.setFont(new Font("Arial", Font.PLAIN, 16));
+        // 使用简单的文字代替emoji，确保跨平台兼容
+        JLabel micLabel = new JLabel("MIC");
+        micLabel.setFont(new Font("Arial", Font.BOLD, 10));
         micIndicator.add(micLabel);
         leftPanel.add(micIndicator);
         bottomPanel.add(leftPanel, BorderLayout.WEST);
@@ -137,8 +138,7 @@ public class IPPhone extends JFrame {
 
         setVisible(true);
 
-        // 启动时自动开始监听
-        startListening();
+        // 不自动监听，等待用户手动点击
     }
 
     /**
@@ -158,6 +158,11 @@ public class IPPhone extends JFrame {
     private void startListening() {
         if (isConnected) {
             statusArea.append("错误：正在通话中，无法开始监听\n");
+            return;
+        }
+
+        if (isListening) {
+            statusArea.append("错误：已经在监听中\n");
             return;
         }
 
@@ -190,6 +195,7 @@ public class IPPhone extends JFrame {
                         if ("DIAL".equals(msg)) {
                             tcpOut.println("ACCEPT"); // 自动接受
                             isConnected = true;
+                            isListening = false; // 停止监听标志
 
                             SwingUtilities.invokeLater(() -> {
                                 statusArea.append("✓ 已接听，正在建立音频通道...\n");
@@ -219,7 +225,19 @@ public class IPPhone extends JFrame {
                 if (isListening) {
                     SwingUtilities.invokeLater(() -> {
                         statusArea.append("✗ 监听错误: " + ex.getMessage() + "\n");
+                        listenButton.setText("Start Listen 开始监听");
+                        dialButton.setEnabled(true);
                     });
+                    isListening = false;
+                }
+            } finally {
+                // 确保ServerSocket被关闭
+                if (serverSocket != null && !serverSocket.isClosed()) {
+                    try {
+                        serverSocket.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
         });
@@ -230,6 +248,10 @@ public class IPPhone extends JFrame {
      * 停止监听
      */
     private void stopListening() {
+        if (!isListening) {
+            return; // 如果没在监听，直接返回
+        }
+
         isListening = false;
         try {
             if (serverSocket != null && !serverSocket.isClosed()) {
@@ -389,20 +411,20 @@ public class IPPhone extends JFrame {
                 String msg;
                 while (shouldListen && (msg = tcpIn.readLine()) != null) {
                     if ("HANGUP".equals(msg)) {
-                        statusArea.append("对方已挂断\n");
                         SwingUtilities.invokeLater(() -> {
+                            statusArea.append("对方已挂断\n");
                             cleanup();
-                            startListening(); // 重新开始监听
+                            // 不自动重新监听，由用户手动控制
                         });
                         break;
                     }
                 }
             } catch (IOException ex) {
                 if (shouldListen) {
-                    statusArea.append("连接已断开\n");
                     SwingUtilities.invokeLater(() -> {
+                        statusArea.append("连接已断开\n");
                         cleanup();
-                        startListening(); // 重新开始监听
+                        // 不自动重新监听，由用户手动控制
                     });
                 }
             }
@@ -424,7 +446,7 @@ public class IPPhone extends JFrame {
             statusArea.append("挂断错误: " + ex.getMessage() + "\n");
         } finally {
             cleanup();
-            startListening(); // 挂断后重新开始监听
+            // 不自动重新监听，由用户手动控制
         }
     }
 
